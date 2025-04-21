@@ -62,7 +62,9 @@ co_data_place <- get_acs(
   year = acs_year,
   survey = acs_survey,
   cache_table = TRUE
-)
+) |>
+  mutate(geography = "place")
+
 
 co_data_county <- get_acs(
   geography = "place",
@@ -71,7 +73,9 @@ co_data_county <- get_acs(
   year = acs_year,
   survey = acs_survey,
   cache_table = TRUE
-)
+) |>
+  mutate(geography = "county")
+
 
 # Get state and national data
 state_data <- get_acs(
@@ -80,7 +84,9 @@ state_data <- get_acs(
   year = acs_year,
   survey = acs_survey,
   cache_table = TRUE
-)
+) |>
+  mutate(geography = "state")
+
 
 us_data <- get_acs(
   geography = "us",
@@ -88,7 +94,8 @@ us_data <- get_acs(
   year = acs_year,
   survey = acs_survey,
   cache_table = TRUE
-)
+) |>
+  mutate(geography = "us")
 
 all_cost_burdened <- bind_rows(
   co_data_place,
@@ -99,14 +106,6 @@ all_cost_burdened <- bind_rows(
   left_join(
     acs_variables,
     by = c("variable" = "name")
-  )
-
-all_cost_burdened_wide <- all_cost_burdened |>
-  select(-concept, -variable) |>
-  pivot_wider(
-    names_from = c(label),
-    values_from = c(estimate, moe),
-    names_sep = "_"
   )
 
 write_csv(all_cost_burdened, "all_cost_burdened.csv")
