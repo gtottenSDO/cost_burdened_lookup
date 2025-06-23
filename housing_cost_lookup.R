@@ -21,6 +21,8 @@
 # Load necessary libraries
 library(tidycensus)
 library(tidyverse)
+library(duckplyr)
+library(duckdb)
 
 #-----------------------------------------------------------------------------
 # Configuration
@@ -34,7 +36,7 @@ library(tidyverse)
 
 # Define the year for the ACS data (e.g., 2022 for 2018-2022 5-year estimates)
 # tidycensus defaults to the latest available 5-year ACS if year is omitted.
-acs_year <- 2023
+acs_year <- 2005
 acs_survey <- "acs1" # Use 5-year estimates for more reliability
 
 # Define the geography (State of Colorado)
@@ -43,8 +45,11 @@ state_fips <- "08" # FIPS code for Colorado
 # Get list of variables from tidycensus
 acs_variables <- load_variables(acs_year, "acs1")
 
+acs_income_pct_vars <- acs_variables |> 
+  filter(str_detect(concept, regex("cost", ignore_case = TRUE)))
+
 housing_costs_income_vars <- acs_variables |>
-  filter(str_detect(name, "B25106")) |>
+  filter(str_detect(name, "B25106") | str_detect(name, "B25140")) |>
   pull(name)
 
 
@@ -53,112 +58,105 @@ housing_costs_income_vars <- acs_variables |>
 #-----------------------------------------------------------------------------
 # Use get_acs to retrieve the data for Colorado
 # output = "wide" makes each variable its own column
-print(paste("Fetching ACS", acs_survey, acs_year, "data for Colorado..."))
 
-co_data_place <- get_acs(
-  geography = "place",
-  state = state_fips,
-  variables = housing_costs_income_vars,
-  year = acs_year,
-  survey = acs_survey,
-  cache_table = TRUE
-) |>
-  mutate(geography = "place")
+get_multi_acs <- function(acs_year, acs_survey) {
+  # Get list of variables from tidycensus
+  acs_variables <- load_variables(acs_year, "acs1")
 
+  housing_costs_income_vars <- acs_variables |>
+    filter(str_detect(name, "B25106") | str_detect(name, "B25140")) |>
+    pull(name)
 
-co_data_county <- get_acs(
-  geography = "place",
-  state = state_fips,
-  variables = housing_costs_income_vars,
-  year = acs_year,
-  survey = acs_survey,
-  cache_table = TRUE
-) |>
-  mutate(geography = "county")
+  print(paste("Fetching ACS", acs_survey, acs_year, "data for Colorado..."))
 
+  data_place <- get_acs(
+    geography = "place",
+    variables = housing_costs_income_vars,
+    year = acs_year,
+    survey = acs_survey,
+    cache_table = TRUE
+  ) |>
+    mutate(geography = "place")
 
-# Get state and national data
-state_data <- get_acs(
-  geography = "state",
-  variables = housing_costs_income_vars,
-  year = acs_year,
-  survey = acs_survey,
-  cache_table = TRUE
-) |>
-  mutate(geography = "state")
+  data_county <- get_acs(
+    geography = "county",
+    variables = housing_costs_income_vars,
+    year = acs_year,
+    survey = acs_survey,
+    cache_table = TRUE
+  ) |>
+    mutate(geography = "county")
 
+  # Get state and national data
+  state_data <- get_acs(
+    geography = "state",
+    variables = housing_costs_income_vars,
+    year = acs_year,
+    survey = acs_survey,
+    cache_table = TRUE
+  ) |>
+    mutate(geography = "state")
 
-us_data <- get_acs(
-  geography = "us",
-  variables = housing_costs_income_vars,
-  year = acs_year,
-  survey = acs_survey,
-  cache_table = TRUE
-) |>
-  mutate(geography = "us")
+  us_data <- get_acs(
+    geography = "us",
+    variables = housing_costs_income_vars,
+    year = acs_year,
+    survey = acs_survey,
+    cache_table = TRUE
+  ) |>
+    mutate(geography = "us")
 
-all_cost_burdened <- bind_rows(
-  co_data_place,
-  co_data_county,
-  state_data,
-  us_data
-) |>
-  left_join(
-    acs_variables,
-    by = c("variable" = "name")
-  )
-
-write_csv(all_cost_burdened, "all_cost_burdened.csv")
-
-# Check if data retrieval was successful
-if (is.null(co_cost_burden_data) || nrow(co_cost_burden_data) == 0) {
-  stop(
-    "Failed to retrieve data. Check API key, internet connection, or variable codes."
-  )
-} else {
-  print("Data fetched successfully.")
+  all_cost_burdened <- bind_rows(
+    data_place,
+    data_county,
+    state_data,
+    us_data
+  ) |>
+    mutate(
+      year = acs_year,
+      survey = acs_survey
+    ) |> 
+    left_join(
+      acs_variables,
+      by = c("variable" = "name")
+    )
 }
 
-#-----------------------------------------------------------------------------
-# Calculate Cost Burden Metrics
-#-----------------------------------------------------------------------------
-# Calculate the total number of cost-burdened households and the percentage
-co_cost_burden_summary <- co_cost_burden_data %>%
-  mutate(
-    # Calculate total cost-burdened households (Renters + Owners)
-    total_cost_burdened_E = renters_cost_burdenedE + owners_cost_burdenedE,
+acs_cost_burden_data <- map(c(2005:2019, 2021:2023), \(x) {
+  get_multi_acs(acs_year = x, "acs1")
+}) |>
+  bind_rows()
 
-    # Calculate the percentage of occupied households that are cost-burdened
-    # Handle potential division by zero if total_occupied_unitsE is 0
-    percent_cost_burdened_E = if_else(
-      total_occupied_unitsE > 0,
-      (total_cost_burdened_E / total_occupied_unitsE) * 100,
-      0 # Assign 0% if there are no occupied units
-    )
-  ) %>%
-  # Select and rename columns for clarity
-  select(
-    GEOID,
-    NAME,
-    Total_Occupied_Units = total_occupied_unitsE,
-    Renters_Cost_Burdened = renters_cost_burdenedE,
-    Owners_Cost_Burdened = owners_cost_burdenedE,
-    Total_Cost_Burdened = total_cost_burdened_E,
-    Percent_Cost_Burdened = percent_cost_burdened_E
+acs_cost_burden_duckdb <- as_duckdb_tibble(acs_cost_burden_data)
+
+acs_cost_burden_duckdb |> 
+  compute_parquet(
+    "data/cost_burdened_households_co.parquet"
   )
 
-#-----------------------------------------------------------------------------
-# Display Results
-#-----------------------------------------------------------------------------
-print("Cost Burden Summary for Colorado:")
-print(co_cost_burden_summary)
+state_cost_burden <- acs_cost_burden_duckdb |>
+  filter(geography == "state" & str_detect(variable, "B25140_")) |>
+  mutate(
+    label = str_remove(label, "Estimate!!Total:!!")
+  ) |> 
+  separate_wider_delim(
+    label, delim = "!!", names = c("tenure", "cost_burden"),
+    too_few = "align_start"
+  )
+  select(label, estimate, moe) |>
+  mutate(
+    variable = str_replace(variable, "B25106", "renters"),
+    variable = str_replace(variable, "B25140", "owners")
+  ) |>
+  pivot_wider(
+    names_from = variable,
+    values_from = c(estimate, moe)
+  ) |>
+  mutate(
+    renters_cost_burdened = estimate_renters / estimate_renters_total * 100,
+    owners_cost_burdened = estimate_owners / estimate_owners_total * 100
+  )
 
-# You can also view the results as a tibble
-# View(co_cost_burden_summary)
-
-#-----------------------------------------------------------------------------
-# Optional: Save Results to CSV
-#-----------------------------------------------------------------------------
-# write_csv(co_cost_burden_summary, "colorado_cost_burden_summary_acs5_2022.csv")
-# print("Results saved to colorado_cost_burden_summary_acs5_2022.csv")
-#-----------------------------------------------------------------------------
+acs_variables |> 
+  filter(str_detect(name, "B25140_"))
+View(state_cost_burden)
